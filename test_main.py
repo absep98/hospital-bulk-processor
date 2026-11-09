@@ -7,7 +7,7 @@ client = TestClient(app)
 def test_root():
     response = client.get("/")
     assert response.status_code == 200
-    assert response.json() == {"message": "hello"}
+    assert response.json() == {"service": "hospital-bulk-processor", "status": "ok", "docs": "/docs"}
 
 def test_preview_ok():
     csv_text = "name,address,phone\nA,1 St,555\n"

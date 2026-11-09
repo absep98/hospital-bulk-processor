@@ -4,4 +4,4 @@ services:
     ports:
       - "8000:8000"
     environment:
-      - MAX_CONCURRENT=2
+      - MAX_CONCURRENT=10

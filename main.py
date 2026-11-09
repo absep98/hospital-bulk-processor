@@ -1,6 +1,4 @@
 from fastapi import FastAPI, UploadFile, File, HTTPException
-from pydantic import BaseModel
-from typing import Optional
 import csv
 import io
 import httpx
@@ -12,48 +10,34 @@ import os
 
 BASE = "https://hospital-directory.onrender.com"
 MAX_CONCURRENT = int(os.getenv("MAX_CONCURRENT", "10"))
-# adding comment
 
-class Hospital(BaseModel):
-    name: str
-    address: str
-    phone: Optional[str] = None
 
 app = FastAPI()  # the application object
 
 
 @app.get("/")
 def read_root():
-    return {"message": "hello"}  # so it converts dict to the json auto
-
-@app.post("/echo")
-def echo_hospital(hospital: Hospital):
-    return {"hospital_name": hospital.name, "hospital_address": hospital.address, "hospital_phone": hospital.phone}
-
-@app.post("/upload")
-async def upload(file: UploadFile = File(...)):
-    content =  await file.read()
-    text = content.decode("utf-8")
-    return {"filename": file.filename, "size": len(content)}
+    return {"service": "hospital-bulk-processor", "status": "ok", "docs": "/docs"}
 
 
 async def parse_csv(file: UploadFile) -> list:
+    """Read and validate an uploaded CSV; return its rows as dicts or raise a 400."""
     try:
         content = await file.read()
         text = content.decode("utf-8")
         reader = csv.DictReader(io.StringIO(text))
         rows = list(reader)
-        fieldNames = reader.fieldnames
-        if not fieldNames:
+        field_names = reader.fieldnames
+        if not field_names:
             raise HTTPException(status_code = 400, detail="CSV file is empty")
-        if 'name' not in fieldNames or 'address' not in fieldNames:
+        if 'name' not in field_names or 'address' not in field_names:
             raise HTTPException(status_code = 400, detail="failed to get all fields")
         if len(rows) > 20:
             raise HTTPException(status_code = 400, detail="got more than 20 rows")
         return rows
     except UnicodeDecodeError:
         raise HTTPException(status_code = 400, detail="File is not valid UTF-8 text")
-    
+
 
 @app.post("/csv-preview")
 async def viewing_csv_data(file: UploadFile = File(...)):
@@ -62,7 +46,7 @@ async def viewing_csv_data(file: UploadFile = File(...)):
 
 
 async def create_one(client, row_number, row, batch_id):
-
+    """Create one hospital in the batch; return a result dict, never raise on API failure."""
     payload = {
         "name": row["name"],
         "address": row["address"],
@@ -81,20 +65,18 @@ async def create_one(client, row_number, row, batch_id):
 
 @app.post("/hospitals/bulk")
 async def bulk_create(file: UploadFile = File(...)):
+    """Create every CSV row as one batch, concurrently, and activate it only if all rows succeeded."""
     start =  time.perf_counter()
     rows = await parse_csv(file)
     batch_id = str(uuid.uuid4())
-
-
     sem = asyncio.Semaphore(MAX_CONCURRENT)
-    
+
     async with httpx.AsyncClient(timeout=60.0) as client:
-        # for number, row in enumerate(rows, start = 1):
-        #     results.append(await create_one(client, number, row, batch_id))
 
         async def limited(n, row):
             async with sem:
                 return await create_one(client, n, row, batch_id)
+
         tasks = [limited(n, row) for n, row in enumerate(rows, start=1)]
         results = list(await asyncio.gather(*tasks))
         failed = [r for r in results if r["status"] == "failed"]
@@ -102,15 +84,15 @@ async def bulk_create(file: UploadFile = File(...)):
         batch_activated = False
         activation_error = None
         if failed_count == 0:
-            # PATCH BASE + f"/hospitals/batch/{batch_id}/activate"
-            # if it returns 200, set batch_activated = True
+
             try:
                 response = await client.patch(BASE + f"/hospitals/batch/{batch_id}/activate")
                 response.raise_for_status()
                 batch_activated = True
+            
             except httpx.HTTPError as exc:
                 activation_error = str(exc)
-            
+
         if batch_activated:
             for r in results:
                 if r["status"] == "created":
