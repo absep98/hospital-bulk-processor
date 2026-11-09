@@ -1,0 +1,5 @@
+venv/
+__pycache__/
+*.pyc
+.env
+Senior_Python_Developer_Assignment.pdf
