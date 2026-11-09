@@ -1,4 +1,6 @@
 from fastapi import FastAPI, UploadFile, File, HTTPException
+from pydantic import BaseModel
+from typing import List, Optional
 import csv
 import io
 import httpx
@@ -12,7 +14,31 @@ BASE = "https://hospital-directory.onrender.com"
 MAX_CONCURRENT = int(os.getenv("MAX_CONCURRENT", "10"))
 
 
-app = FastAPI()  # the application object
+app = FastAPI(title="Hospital Bulk Processor")
+
+
+class PreviewResult(BaseModel):
+    total_rows: int
+    rows: List[dict]
+
+
+class HospitalResult(BaseModel):
+    row: int
+    hospital_id: Optional[int] = None
+    name: Optional[str] = None
+    status: str  # "created", "created_and_activated" or "failed"
+    error: Optional[str] = None
+
+
+class BulkResult(BaseModel):
+    batch_id: str
+    total_hospitals: int
+    processed_hospitals: int
+    failed_hospitals: int
+    processing_time_seconds: float
+    batch_activated: bool
+    hospitals: List[HospitalResult]
+    activation_error: Optional[str] = None
 
 
 @app.get("/")
@@ -32,6 +58,8 @@ async def parse_csv(file: UploadFile) -> list:
             raise HTTPException(status_code = 400, detail="CSV file is empty")
         if 'name' not in field_names or 'address' not in field_names:
             raise HTTPException(status_code = 400, detail="failed to get all fields")
+        if not rows:
+            raise HTTPException(status_code = 400, detail="CSV has no data rows")
         if len(rows) > 20:
             raise HTTPException(status_code = 400, detail="got more than 20 rows")
         return rows
@@ -39,7 +67,7 @@ async def parse_csv(file: UploadFile) -> list:
         raise HTTPException(status_code = 400, detail="File is not valid UTF-8 text")
 
 
-@app.post("/csv-preview")
+@app.post("/csv-preview", response_model=PreviewResult)
 async def viewing_csv_data(file: UploadFile = File(...)):
     rows = await parse_csv(file)
     return {"total_rows": len(rows), "rows": rows}
@@ -47,6 +75,10 @@ async def viewing_csv_data(file: UploadFile = File(...)):
 
 async def create_one(client, row_number, row, batch_id):
     """Create one hospital in the batch; return a result dict, never raise on API failure."""
+    if not (row.get("name") or "").strip() or not (row.get("address") or "").strip():
+        return {"row": row_number, "hospital_id": None, "name": row.get("name") or "",
+                "status": "failed", "error": "name and address are required"}
+
     payload = {
         "name": row["name"],
         "address": row["address"],
@@ -63,7 +95,7 @@ async def create_one(client, row_number, row, batch_id):
         return {"row": row_number, "hospital_id": None, "name": row["name"], "status": "failed", "error": str(exc)}
 
 
-@app.post("/hospitals/bulk")
+@app.post("/hospitals/bulk", response_model=BulkResult)
 async def bulk_create(file: UploadFile = File(...)):
     """Create every CSV row as one batch, concurrently, and activate it only if all rows succeeded."""
     start =  time.perf_counter()

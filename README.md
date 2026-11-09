@@ -17,7 +17,8 @@ once every row has been created.
 | `POST` | `/csv-preview` | Validate a CSV and return the parsed rows. Creates nothing |
 | `GET` | `/` | Health check |
 
-Interactive docs are at `/docs`.
+Interactive docs are at `/docs`. Request and response shapes are declared as Pydantic models, so the schema shown
+there is the real one.
 
 ### CSV format
 
@@ -31,6 +32,8 @@ St. Mary Medical Center,78 Pine Road,
 - Required columns: `name`, `address`. The `phone` column is optional, and a blank phone is sent as `null`.
 - Maximum 20 hospitals per file.
 - UTF-8 text.
+- A row with a blank `name` or `address` is reported as `failed` (`name and address are required`) and no request is
+  made for it. As with any failed row, the batch is then not activated.
 
 ### Example
 
@@ -49,7 +52,7 @@ curl -X POST "http://localhost:8000/hospitals/bulk" \
   "processing_time_seconds": 7.18,
   "batch_activated": true,
   "hospitals": [
-    { "row": 1, "hospital_id": 1340, "name": "General Hospital", "status": "created_and_activated" }
+    { "row": 1, "hospital_id": 1340, "name": "General Hospital", "status": "created_and_activated", "error": null }
   ],
   "activation_error": null
 }
@@ -67,6 +70,7 @@ Invalid files are rejected with `400` before any call is made to the Hospital Di
 | Empty file | `CSV file is empty` |
 | Missing `name` or `address` column | `failed to get all fields` |
 | More than 20 rows | `got more than 20 rows` |
+| Header row but no data rows | `CSV has no data rows` |
 | Not valid UTF-8 | `File is not valid UTF-8 text` |
 
 ## How it works
@@ -164,15 +168,19 @@ With Docker, set it in `docker-compose.yml`. On Render, set it under Environment
 
 ## Testing
 
-There are 9 tests in `test_main.py`:
+There are 13 tests in `test_main.py`:
 
-- **CSV validation** (6): a valid file, an empty file, wrong headers, more than 20 rows, and a non-UTF-8 file. Each
-  asserts both the status code and the error message.
-- **Bulk endpoint** (3): all rows succeed; all rows fail; creation succeeds but activation fails.
+- **Health check** (1).
+- **CSV validation** (6): a valid file, an empty file, a header-only file, wrong headers, more than 20 rows, and a
+  non-UTF-8 file. Each asserts both the status code and the error message.
+- **Bulk endpoint** (6): all rows succeed; all rows fail; some rows fail; creation succeeds but activation fails; rows
+  with a blank name or address, which fail without making a call to the Directory API; and a header-only file, which is
+  rejected without making any call at all.
 
 The Hospital Directory API is mocked with [respx](https://lundberg.github.io/respx/), so the tests are fast and never
-touch the real server. The failure tests also assert the activation rule directly: when rows fail, the activate
-endpoint is never called.
+touch the real server. The failure tests also assert the activation rule directly: when any row fails, the activate
+endpoint is never called. Because rows are created concurrently, the partial-failure test decides which row fails from
+the hospital named in the request body instead of relying on the order requests arrive in.
 
 ## Deployment
 
@@ -192,6 +200,4 @@ Deployed on Render as a Python web service from this repository.
   semaphore would cap the total.
 - **No authentication or rate limiting** on the service itself.
 - **No de-duplication** of rows within a file.
-- **Blank `name` or `address` values** are passed through, and the Directory API decides whether to reject them.
-  Per-row validation before the call would give clearer errors.
 - **The whole upload is held in memory.** That is fine for a 20-row limit.
